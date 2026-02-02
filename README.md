@@ -281,18 +281,42 @@ sudo ./venv/bin/python hotspot_backend.py --allow-mac "AA:BB:CC:DD:EE:FF"
 
 ## 🔒 Security Considerations
 
-### Sudo Configuration
-The installer creates a sudoers entry that allows passwordless execution of **only** the `run_backend.sh` wrapper script. This is necessary because:
-- Network operations require root privileges
-- `nmcli` hotspot creation needs elevated access
-- `iptables` rules for NAT require root
+This application interacts with system networking components, necessitating handling of privileges and data. Below is an overview of risks and implemented mitigations.
 
-The entry is created at: `/etc/sudoers.d/hotspot_universal_UniversalLinuxHotspot`
+### 🛡️ Privilege Management
 
-### Password Security
-- Passwords are stored locally in `~/.config/hotspot_gui_config.json`
-- The config file permissions should be set to user-only readable
-- WPA2-PSK encryption is used for the hotspot
+**Risk**: Configuring network interfaces, modifying firewall rules (`iptables`), and controlling `NetworkManager` requires `root` privileges. Running the entire application (GUI and Backend) as root increases the attack surface.
+
+**Mitigation**:
+- **Process Separation**: The GUI runs as a standard user. Only the backend script executes as root.
+- **Scoped Sudo Access**: The installer creates a specific `sudoers` entry at `/etc/sudoers.d/hotspot_universal_UniversalLinuxHotspot`. This entry whitelists **only** the `run_backend.sh` wrapper script, preventing blanket `sudo` access.
+- **Path Restriction**: The wrapper script specifies the absolute path to the virtual environment's interpreter, preventing execution of arbitrary system commands.
+
+### 🔑 Credential Storage
+
+**Risk**: The hotspot SSID and WPA2 password are stored on the local filesystem. Universal read access to this file would expose credentials.
+
+**Mitigation**:
+- **User-Local Config**: Configuration is stored in `~/.config/hotspot_gui_config.json`.
+- **System Permissions**: Standard Linux file permissions apply. Ensure your home directory or the config file prevents read access by other users (`chmod 600`).
+- **Local-Only**: Credentials remain on the device and are not transmitted to external servers.
+
+### 📡 Network & Firewall
+
+**Risk**: Enabled IP forwarding and NAT allows connected devices to route traffic through the host, potentially exposing local network services.
+
+**Mitigation**:
+- **WPA2 Encryption**: The application enforces WPA2-PSK. Open networks are disabled by default.
+- **Ephemeral Rules**: Firewall rules (`iptables`) for NAT and forwarding are applied upon start and removed upon stop (`--stop` or exit).
+- **Injection Prevention**: Input validation is performed on SSID and password fields to prevent shell injection via the `nmcli` subprocess calls.
+
+### 📦 Dependency Isolation
+
+**Risk**: Installing Python packages globally can conflict with system package managers and introduce vulnerabilities to the base system.
+
+**Mitigation**:
+- **Virtual Environment**: The application operates within an isolated `venv` directory.
+- **Dependency Scope**: Libraries like `PyQt6` and `qrcode` are installed locally to the application folder, leaving the system Python environment untouched.
 
 ---
 
