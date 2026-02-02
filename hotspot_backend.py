@@ -48,18 +48,288 @@ def ensure_wifi_active(iface):
     print(f"Warning: Interface {iface} is still not fully ready, but proceeding...")
 
 def get_wifi_interfaces():
-    run_command(['nmcli', 'device', 'refresh'], check=False)
-    output = run_command(['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE', 'device'])
-    wifi_devices = []
-    if output:
-        for line in output.split('\n'):
-            # Look for wifi devices, but exclude P2P
-            if ':wifi:' in line and not ':wifi-p2p:' in line:
-                parts = line.split(':')
-                dev = parts[0]
-                if not dev.startswith("p2p-"):
-                    wifi_devices.append(dev)
-    return wifi_devices
+    """Legacy function for backward compatibility."""
+    interfaces = get_detailed_interfaces()
+    return [iface['name'] for iface in interfaces if iface['type'] == 'wifi']
+
+def get_detailed_interfaces():
+    """
+    Get detailed information about all network interfaces.
+    Returns list of dicts with: name, type, driver, bus, ap_support, connected, connection_name, label
+    """
+    interfaces = []
+    
+    try:
+        run_command(['nmcli', 'device', 'refresh'], check=False)
+        
+        # Get device list with connection info
+        output = run_command(['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'device'], check=False)
+        if not output:
+            return interfaces
+        
+        for line in output.splitlines():
+            parts = line.split(':')
+            if len(parts) < 3:
+                continue
+            
+            dev_name = parts[0]
+            dev_type = parts[1]
+            dev_state = parts[2]
+            dev_connection = parts[3] if len(parts) > 3 else ""
+            
+            # Skip virtual and P2P interfaces
+            if dev_name.startswith(('lo', 'docker', 'br-', 'veth', 'virbr', 'p2p-')):
+                continue
+            if dev_type == 'wifi-p2p':
+                continue
+            
+            iface_info = {
+                'name': dev_name,
+                'type': dev_type,
+                'state': dev_state,
+                'connected': dev_state == 'connected',
+                'connection_name': dev_connection if dev_connection and dev_connection != '--' else None,
+                'driver': None,
+                'bus': None,
+                'is_usb': False,
+                'is_internal': False,
+                'ap_support': False,
+                'supports_5ghz': False,
+                'label': dev_name
+            }
+            
+            # Get driver and bus info
+            try:
+                # Check if USB device
+                usb_check = subprocess.run(
+                    ['readlink', '-f', f'/sys/class/net/{dev_name}/device'],
+                    capture_output=True, text=True, timeout=2
+                )
+                if usb_check.returncode == 0:
+                    device_path = usb_check.stdout.strip()
+                    iface_info['is_usb'] = '/usb' in device_path
+                    iface_info['is_internal'] = '/pci' in device_path and '/usb' not in device_path
+                
+                # Get driver name
+                driver_link = f'/sys/class/net/{dev_name}/device/driver'
+                driver_check = subprocess.run(
+                    ['readlink', '-f', driver_link],
+                    capture_output=True, text=True, timeout=2
+                )
+                if driver_check.returncode == 0:
+                    iface_info['driver'] = os.path.basename(driver_check.stdout.strip())
+            except:
+                pass
+            
+            # Check AP mode support for WiFi interfaces
+            if dev_type == 'wifi':
+                ap_ok, _ = check_ap_mode_support_for_iface(dev_name)
+                iface_info['ap_support'] = ap_ok
+                
+                # Check 5GHz support
+                iface_info['supports_5ghz'] = check_5ghz_support_for_iface(dev_name)
+            
+            # Generate human-friendly label
+            iface_info['label'] = generate_interface_label(iface_info)
+            
+            interfaces.append(iface_info)
+    
+    except Exception as e:
+        print(f"Error discovering interfaces: {e}")
+    
+    return interfaces
+
+def check_ap_mode_support_for_iface(iface):
+    """Check if a specific interface supports AP mode."""
+    try:
+        # Get the phy name for this interface
+        phy_result = subprocess.run(
+            ['iw', 'dev', iface, 'info'],
+            capture_output=True, text=True, timeout=5
+        )
+        if phy_result.returncode != 0:
+            return True, None  # Can't check, assume OK
+        
+        phy_name = None
+        for line in phy_result.stdout.splitlines():
+            if 'wiphy' in line:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == 'wiphy':
+                        phy_name = f"phy{parts[i+1]}"
+                        break
+        
+        if not phy_name:
+            return True, None
+        
+        # Check capabilities for this phy
+        phy_info = subprocess.run(['iw', phy_name, 'info'], capture_output=True, text=True, timeout=5)
+        if phy_info.returncode != 0:
+            return True, None
+        
+        in_modes = False
+        for line in phy_info.stdout.splitlines():
+            if 'Supported interface modes:' in line:
+                in_modes = True
+                continue
+            if in_modes:
+                if line.strip().startswith('*'):
+                    if 'AP' in line:
+                        return True, None
+                elif line.strip() and not line.startswith('\t\t'):
+                    in_modes = False
+        
+        return False, f"{iface} does not support AP mode"
+    except:
+        return True, None
+
+def check_5ghz_support_for_iface(iface):
+    """Check if a specific interface supports 5GHz."""
+    try:
+        phy_result = subprocess.run(
+            ['iw', 'dev', iface, 'info'],
+            capture_output=True, text=True, timeout=5
+        )
+        if phy_result.returncode != 0:
+            return False
+        
+        phy_name = None
+        for line in phy_result.stdout.splitlines():
+            if 'wiphy' in line:
+                parts = line.split()
+                for i, p in enumerate(parts):
+                    if p == 'wiphy':
+                        phy_name = f"phy{parts[i+1]}"
+                        break
+        
+        if not phy_name:
+            return False
+        
+        phy_info = subprocess.run(['iw', phy_name, 'info'], capture_output=True, text=True, timeout=5)
+        # Look for 5GHz frequencies
+        return '5180' in phy_info.stdout or '5240' in phy_info.stdout or '5745' in phy_info.stdout
+    except:
+        return False
+
+def generate_interface_label(iface_info):
+    """Generate a human-friendly label for an interface."""
+    name = iface_info['name']
+    itype = iface_info['type']
+    
+    parts = []
+    
+    # Base type
+    if itype == 'wifi':
+        if iface_info['is_usb']:
+            parts.append("USB Wi-Fi Adapter")
+        elif iface_info['is_internal']:
+            parts.append("Built-in Wi-Fi")
+        else:
+            parts.append("Wi-Fi")
+    elif itype == 'ethernet':
+        if iface_info['is_usb']:
+            parts.append("USB Ethernet")
+        else:
+            parts.append("Ethernet")
+    elif itype == 'bridge':
+        parts.append("Bridge")
+    else:
+        parts.append(itype.title())
+    
+    # Add capabilities for WiFi
+    if itype == 'wifi':
+        caps = []
+        if iface_info.get('ap_support'):
+            caps.append("AP")
+        if iface_info.get('supports_5ghz'):
+            caps.append("5GHz")
+        if caps:
+            parts.append(f"[{', '.join(caps)}]")
+    
+    # Add connection status
+    if iface_info.get('connected') and iface_info.get('connection_name'):
+        parts.append(f"→ {iface_info['connection_name']}")
+    
+    # Add device name
+    parts.append(f"({name})")
+    
+    return " ".join(parts)
+
+def get_smart_interface_selection():
+    """
+    Intelligently select which interface should be used for internet and which for hotspot.
+    Returns: (internet_iface, hotspot_iface, reason)
+    """
+    interfaces = get_detailed_interfaces()
+    
+    # Categorize interfaces
+    ethernet_ifaces = [i for i in interfaces if i['type'] == 'ethernet' and i['state'] != 'unavailable']
+    wifi_ifaces = [i for i in interfaces if i['type'] == 'wifi']
+    usb_wifi = [i for i in wifi_ifaces if i['is_usb'] and i['ap_support']]
+    internal_wifi = [i for i in wifi_ifaces if i['is_internal']]
+    ap_capable_wifi = [i for i in wifi_ifaces if i['ap_support']]
+    
+    internet_iface = None
+    hotspot_iface = None
+    reason = ""
+    
+    # Best case: Ethernet for internet, any WiFi for hotspot
+    connected_ethernet = [i for i in ethernet_ifaces if i['connected']]
+    if connected_ethernet and ap_capable_wifi:
+        internet_iface = connected_ethernet[0]['name']
+        # Prefer USB WiFi for hotspot if available
+        hotspot_iface = usb_wifi[0]['name'] if usb_wifi else ap_capable_wifi[0]['name']
+        reason = "Using Ethernet for internet, WiFi for hotspot (optimal)"
+        return internet_iface, hotspot_iface, reason
+    
+    # Second best: Two WiFi adapters - internal for internet, USB for hotspot
+    if len(wifi_ifaces) >= 2:
+        connected_internal = [i for i in internal_wifi if i['connected']]
+        if connected_internal and usb_wifi:
+            internet_iface = connected_internal[0]['name']
+            hotspot_iface = usb_wifi[0]['name']
+            reason = "Using internal WiFi for internet, USB adapter for hotspot"
+            return internet_iface, hotspot_iface, reason
+    
+    # Third: Single WiFi adapter case
+    if len(wifi_ifaces) == 1 and wifi_ifaces[0]['ap_support']:
+        wifi = wifi_ifaces[0]
+        if wifi['connected']:
+            # This is the risky case - only one WiFi and it's the internet source
+            hotspot_iface = wifi['name']
+            internet_iface = wifi['name']
+            reason = "WARNING: Single WiFi adapter - will disconnect from current network"
+            return internet_iface, hotspot_iface, reason
+        else:
+            hotspot_iface = wifi['name']
+            if connected_ethernet:
+                internet_iface = connected_ethernet[0]['name']
+                reason = "Using disconnected WiFi for hotspot, Ethernet for internet"
+            else:
+                internet_iface = None
+                reason = "No internet source available"
+            return internet_iface, hotspot_iface, reason
+    
+    # Fallback: Just pick what's available
+    if ap_capable_wifi:
+        hotspot_iface = ap_capable_wifi[0]['name']
+    if connected_ethernet:
+        internet_iface = connected_ethernet[0]['name']
+    elif wifi_ifaces:
+        connected_wifi = [i for i in wifi_ifaces if i['connected']]
+        if connected_wifi:
+            internet_iface = connected_wifi[0]['name']
+    
+    if not hotspot_iface:
+        reason = "No WiFi adapter with AP support found"
+    elif not internet_iface:
+        reason = "No internet source available"
+    else:
+        reason = "Auto-selected based on availability"
+    
+    return internet_iface, hotspot_iface, reason
+
+
 
 def check_ap_mode_support(iface):
     """Check if interface supports AP (Access Point) mode using iw."""
