@@ -1,6 +1,6 @@
 # 📡 Universal Linux Hotspot
 
-A **powerful, portable, and user-friendly** Wi-Fi hotspot application for Linux. Transform any Linux machine into a wireless access point with a beautiful system tray GUI, smart interface detection, and comprehensive safety features.
+A **powerful, portable, and user-friendly** Wi-Fi hotspot application for Linux. Transform any Linux machine into a wireless access point with **seamless VPN routing**, a beautiful system tray GUI, smart interface detection, and comprehensive safety features.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.8+-green.svg)
@@ -54,6 +54,11 @@ Right-click the tray icon for instant access to:
 - Hidden network (stealth) mode
 - MAC address filtering (allowlist/blocklist)
 - Custom DNS server configuration
+
+### 🕵️ **Privacy & VPN Support**
+- **VPN Tunneling**: Route all hotspot traffic through your active WireGuard or OpenVPN connection.
+- **Interface Locking**: Securely bind the internet source to your VPN interface (e.g., `tun0`, `wg0`).
+- **DNS Leak Protection**: Support for custom DNS servers to prevent ISP DNS sniffing.
 
 ### ⏱️ **Convenience Features**
 - Auto-off timer (1-120 minutes)
@@ -317,6 +322,15 @@ This application interacts with system networking components, necessitating hand
 **Mitigation**:
 - **Virtual Environment**: The application operates within an isolated `venv` directory.
 - **Dependency Scope**: Libraries like `PyQt6` and `qrcode` are installed locally to the application folder, leaving the system Python environment untouched.
+
+### 🕵️ VPN Routing & Privacy
+
+**Risk**: Hotspot clients' traffic normally bypasses local VPN configurations, exposing real IP addresses and browsing data to the ISP.
+
+**Mitigation**:
+- **Tunnel Routing**: The application identifies and lists VPN interfaces (`tun`, `wg`, `ppp`) as valid internet sources.
+- **Explicit Selection**: Users can explicitly select a VPN interface as the "Internet Source," forcing client traffic through the encrypted tunnel.
+- **Route Management**: Custom `iptables` forwarding rules are generated to bridge the Wi-Fi AP subnetwork directly to the VPN interface.
 
 ---
 
