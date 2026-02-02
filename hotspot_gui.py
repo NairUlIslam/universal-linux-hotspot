@@ -575,49 +575,63 @@ class HotspotTray(QSystemTrayIcon):
         self.hotspot_iface_menu.clear()
         self.internet_iface_menu.clear()
         
-        # Get interfaces (use basic discovery to avoid delay)
+        # Get detailed interfaces using backend discovery
         interfaces = []
         try:
-            output = subprocess.check_output(
-                ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"],
-                text=True, timeout=5
-            )
-            for line in output.splitlines():
-                parts = line.split(':')
-                if len(parts) >= 3:
-                    dev_name, dev_type, dev_state = parts[0], parts[1], parts[2]
-                    dev_conn = parts[3] if len(parts) > 3 and parts[3] != '--' else ""
-                    
-                    if dev_name.startswith(('lo', 'docker', 'br-', 'veth', 'p2p-')):
-                        continue
-                    if dev_type == 'wifi-p2p':
-                        continue
-                    
-                    label = f"{dev_type.title()} ({dev_name})"
-                    if dev_state == 'connected' and dev_conn:
-                        label += f" → {dev_conn}"
-                    
-                    interfaces.append({
-                        'name': dev_name,
-                        'type': dev_type,
-                        'label': label,
-                        'connected': dev_state == 'connected'
-                    })
-        except:
-            pass
+            import importlib.util
+            backend_path = os.path.join(os.path.dirname(__file__), "hotspot_backend.py")
+            if os.path.exists(backend_path):
+                spec = importlib.util.spec_from_file_location("hotspot_backend", backend_path)
+                backend = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(backend)
+                interfaces = backend.get_detailed_interfaces()
+        except Exception as e:
+            print(f"Could not load detailed interfaces: {e}")
+        
+        # Fallback to basic discovery if backend fails
+        if not interfaces:
+            try:
+                output = subprocess.check_output(
+                    ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"],
+                    text=True, timeout=5
+                )
+                for line in output.splitlines():
+                    parts = line.split(':')
+                    if len(parts) >= 3:
+                        dev_name, dev_type, dev_state = parts[0], parts[1], parts[2]
+                        dev_conn = parts[3] if len(parts) > 3 and parts[3] != '--' else ""
+                        
+                        if dev_name.startswith(('lo', 'docker', 'br-', 'veth', 'p2p-')):
+                            continue
+                        if dev_type == 'wifi-p2p':
+                            continue
+                        
+                        label = f"{dev_type.title()} ({dev_name})"
+                        if dev_state == 'connected' and dev_conn:
+                            label += f" → {dev_conn}"
+                        
+                        interfaces.append({
+                            'name': dev_name,
+                            'type': dev_type,
+                            'label': label,
+                            'connected': dev_state == 'connected',
+                            'ap_support': dev_type == 'wifi'
+                        })
+            except:
+                pass
         
         current_hotspot = self.settings.get("interface")
         current_internet = self.settings.get("internet_interface")
         
         # Add Auto option to both
-        auto_hotspot = QAction("Auto-detect (Smart)", self)
+        auto_hotspot = QAction("🤖 Auto-detect (Smart)", self)
         auto_hotspot.setCheckable(True)
         auto_hotspot.setChecked(current_hotspot is None)
         auto_hotspot.triggered.connect(lambda: self.set_interface("hotspot", None))
         self.hotspot_iface_menu.addAction(auto_hotspot)
         self.hotspot_iface_menu.addSeparator()
         
-        auto_internet = QAction("Auto-detect (Smart)", self)
+        auto_internet = QAction("🤖 Auto-detect (Smart)", self)
         auto_internet.setCheckable(True)
         auto_internet.setChecked(current_internet is None)
         auto_internet.triggered.connect(lambda: self.set_interface("internet", None))
@@ -626,17 +640,28 @@ class HotspotTray(QSystemTrayIcon):
         
         # Populate Hotspot menu (WiFi only)
         for iface in interfaces:
-            if iface['type'] == 'wifi':
-                action = QAction(iface['label'], self)
+            if iface.get('type') == 'wifi':
+                # Use detailed label from backend
+                label = iface.get('label', iface['name'])
+                
+                # Add AP warning if no support
+                if not iface.get('ap_support', True):
+                    label += " ⚠️ No AP"
+                
+                action = QAction(label, self)
                 action.setCheckable(True)
                 action.setChecked(iface['name'] == current_hotspot)
                 action.triggered.connect(lambda checked, n=iface['name']: self.set_interface("hotspot", n))
                 self.hotspot_iface_menu.addAction(action)
         
-        # Populate Internet menu (WiFi + Ethernet)
+        # Populate Internet menu (all relevant interfaces)
         for iface in interfaces:
-            if iface['type'] in ('wifi', 'ethernet'):
-                action = QAction(iface['label'], self)
+            iface_type = iface.get('type', '')
+            if iface_type in ('wifi', 'ethernet') or iface.get('is_vpn') or iface.get('is_mobile') or iface.get('is_tethered'):
+                # Use detailed label from backend
+                label = iface.get('label', iface['name'])
+                
+                action = QAction(label, self)
                 action.setCheckable(True)
                 action.setChecked(iface['name'] == current_internet)
                 action.triggered.connect(lambda checked, n=iface['name']: self.set_interface("internet", n))
