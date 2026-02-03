@@ -307,7 +307,7 @@ This application interacts with system networking components, necessitating hand
 
 **Mitigation**:
 - **Process Separation**: The GUI runs as a standard user. Only the backend script executes as root.
-- **Scoped Sudo Access**: The installer creates a specific `sudoers` entry at `/etc/sudoers.d/hotspot_universal_UniversalLinuxHotspot`. This entry whitelists **only** the `run_backend.sh` wrapper script, preventing blanket `sudo` access.
+- **Scoped Sudo Access**: The installer creates a specific `sudoers` entry at `/etc/sudoers.d/hotspot_universal_universal-linux-hotspot`. This entry whitelists **only** the `run_backend.sh` wrapper script, preventing blanket `sudo` access.
 - **Path Restriction**: The wrapper script specifies the absolute path to the virtual environment's interpreter, preventing execution of arbitrary system commands.
 
 ### 🔑 Credential Storage
