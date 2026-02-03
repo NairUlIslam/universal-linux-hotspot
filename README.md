@@ -99,8 +99,8 @@ Right-click the tray icon for instant access to:
 ### Quick Install (Recommended)
 
 ```bash
-git clone https://github.com/NairUlIslam/UniversalLinuxHotspot.git
-cd UniversalLinuxHotspot
+git clone https://github.com/NairUlIslam/universal-linux-hotspot.git
+cd universal-linux-hotspot
 sudo bash install.sh
 ```
 
@@ -113,8 +113,8 @@ The installer will:
 ### Manual Installation
 
 ```bash
-git clone https://github.com/NairUlIslam/UniversalLinuxHotspot.git
-cd UniversalLinuxHotspot
+git clone https://github.com/NairUlIslam/universal-linux-hotspot.git
+cd universal-linux-hotspot
 
 # Create virtual environment
 python3 -m venv venv
@@ -246,7 +246,7 @@ The app shows detailed labels for each interface:
 ## 📁 Project Structure
 
 ```
-UniversalLinuxHotspot/
+universal-linux-hotspot/
 ├── hotspot_gui.py      # Main GUI application (system tray)
 ├── hotspot_backend.py  # Backend (runs as root for network ops)
 ├── run_backend.sh      # Wrapper script for sudo execution
@@ -385,8 +385,8 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 ### Development Setup
 
 ```bash
-git clone https://github.com/NairUlIslam/UniversalLinuxHotspot.git
-cd UniversalLinuxHotspot
+git clone https://github.com/NairUlIslam/universal-linux-hotspot.git
+cd universal-linux-hotspot
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
