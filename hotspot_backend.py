@@ -49,6 +49,26 @@ def ensure_wifi_active(iface):
         time.sleep(1)
     print(f"Warning: Interface {iface} is still not fully ready, but proceeding...")
 
+# ============================================================
+# STA+AP CONCURRENT MODE FUNCTIONS (hostapd + dnsmasq)
+# ============================================================
+
+HOSTAPD_CONF = "/tmp/hotspot_hostapd.conf"
+HOSTAPD_PID = "/tmp/hotspot_hostapd.pid"
+DNSMASQ_CONF = "/tmp/hotspot_dnsmasq.conf"
+DNSMASQ_PID = "/tmp/hotspot_dnsmasq.pid"
+DNSMASQ_LEASES = "/tmp/hotspot_dnsmasq.leases"
+
+def check_hostapd_available():
+    """Check if hostapd is installed."""
+    result = subprocess.run(['which', 'hostapd'], capture_output=True, text=True)
+    return result.returncode == 0
+
+def check_dnsmasq_available():
+    """Check if dnsmasq is installed."""
+    result = subprocess.run(['which', 'dnsmasq'], capture_output=True, text=True)
+    return result.returncode == 0
+
 def create_virtual_ap_interface(physical_iface):
     """
     Create a virtual AP interface for STA+AP concurrent mode.
@@ -77,11 +97,11 @@ def create_virtual_ap_interface(physical_iface):
         print(f"Failed to create virtual interface: {result.stderr}")
         return None
     
+    # Give it a moment to initialize
+    time.sleep(0.3)
+    
     # Bring the interface up
     subprocess.run(['ip', 'link', 'set', virtual_iface, 'up'], check=False)
-    
-    # Give it a moment to initialize
-    time.sleep(0.5)
     
     # Verify it was created
     result = subprocess.run(['ip', 'link', 'show', virtual_iface], 
@@ -104,6 +124,180 @@ def delete_virtual_ap_interface(physical_iface):
         subprocess.run(['iw', 'dev', virtual_iface, 'del'], check=False)
         return True
     return False
+
+def get_wifi_channel(iface):
+    """Get the current channel of a WiFi interface."""
+    try:
+        result = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if 'channel' in line.lower():
+                    # Parse: channel 36 (5180 MHz), width: 80 MHz
+                    match = re.search(r'channel\s+(\d+)', line)
+                    if match:
+                        return int(match.group(1))
+    except:
+        pass
+    return 6  # Default to channel 6
+
+def generate_hostapd_config(iface, ssid, password, channel=6, band='bg', hidden=False):
+    """Generate hostapd configuration file."""
+    # Determine hardware mode based on band and channel
+    if band == 'a' or channel > 14:
+        hw_mode = 'a'
+    else:
+        hw_mode = 'g'
+    
+    config = f"""# Hotspot hostapd configuration
+interface={iface}
+driver=nl80211
+ssid={ssid}
+hw_mode={hw_mode}
+channel={channel}
+wmm_enabled=0
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid={'1' if hidden else '0'}
+wpa=2
+wpa_passphrase={password}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP
+rsn_pairwise=CCMP
+"""
+    
+    with open(HOSTAPD_CONF, 'w') as f:
+        f.write(config)
+    
+    return HOSTAPD_CONF
+
+def generate_dnsmasq_config(iface, dns_server=None):
+    """Generate dnsmasq configuration for DHCP."""
+    # Use a subnet that's unlikely to conflict
+    subnet = "192.168.45"
+    
+    config = f"""# Hotspot dnsmasq configuration
+interface={iface}
+bind-interfaces
+dhcp-range={subnet}.10,{subnet}.250,255.255.255.0,24h
+dhcp-option=option:router,{subnet}.1
+dhcp-leasefile={DNSMASQ_LEASES}
+"""
+    
+    if dns_server:
+        config += f"server={dns_server}\n"
+    else:
+        config += "server=8.8.8.8\nserver=8.8.4.4\n"
+    
+    with open(DNSMASQ_CONF, 'w') as f:
+        f.write(config)
+    
+    return DNSMASQ_CONF, f"{subnet}.1"
+
+def start_hostapd(config_file):
+    """Start hostapd with the given config."""
+    # Kill any existing hostapd
+    subprocess.run(['pkill', '-f', 'hostapd.*hotspot'], check=False)
+    time.sleep(0.3)
+    
+    # Start hostapd
+    print("Starting hostapd...")
+    proc = subprocess.Popen(
+        ['hostapd', '-B', '-P', HOSTAPD_PID, config_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    # Wait a bit and check if it started successfully
+    time.sleep(1)
+    
+    if os.path.exists(HOSTAPD_PID):
+        with open(HOSTAPD_PID, 'r') as f:
+            pid = f.read().strip()
+        # Check if process is running
+        try:
+            os.kill(int(pid), 0)
+            print(f"hostapd started successfully (PID: {pid})")
+            return True
+        except:
+            pass
+    
+    # Check for errors
+    result = subprocess.run(['hostapd', '-d', config_file], 
+                           capture_output=True, text=True, timeout=3)
+    print(f"hostapd failed to start: {result.stderr}")
+    return False
+
+def start_dnsmasq(config_file):
+    """Start dnsmasq with the given config."""
+    # Kill any existing dnsmasq for our config
+    subprocess.run(['pkill', '-f', 'dnsmasq.*hotspot'], check=False)
+    time.sleep(0.3)
+    
+    # Ensure lease file exists
+    open(DNSMASQ_LEASES, 'a').close()
+    
+    # Start dnsmasq
+    print("Starting dnsmasq...")
+    result = subprocess.run(
+        ['dnsmasq', '-C', config_file, '-x', DNSMASQ_PID],
+        capture_output=True, text=True
+    )
+    
+    if result.returncode == 0:
+        print("dnsmasq started successfully")
+        return True
+    else:
+        print(f"dnsmasq failed to start: {result.stderr}")
+        return False
+
+def setup_concurrent_ap_network(iface, gateway_ip, upstream_iface):
+    """Configure network for the concurrent AP interface."""
+    # Assign IP to the AP interface
+    subprocess.run(['ip', 'addr', 'flush', 'dev', iface], check=False)
+    subprocess.run(['ip', 'addr', 'add', f'{gateway_ip}/24', 'dev', iface], check=False)
+    subprocess.run(['ip', 'link', 'set', iface, 'up'], check=False)
+    
+    # Enable IP forwarding
+    subprocess.run(['sysctl', '-w', 'net.ipv4.ip_forward=1'], check=False)
+    
+    # Setup NAT for the AP subnet
+    subnet = gateway_ip.rsplit('.', 1)[0] + '.0/24'
+    subprocess.run(['iptables', '-t', 'nat', '-A', 'POSTROUTING', 
+                   '-s', subnet, '-o', upstream_iface, '-j', 'MASQUERADE'], check=False)
+    subprocess.run(['iptables', '-A', 'FORWARD', '-i', iface, '-o', upstream_iface, '-j', 'ACCEPT'], check=False)
+    subprocess.run(['iptables', '-A', 'FORWARD', '-i', upstream_iface, '-o', iface, 
+                   '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT'], check=False)
+
+def stop_concurrent_mode():
+    """Stop hostapd and dnsmasq, cleanup everything."""
+    print("Stopping concurrent mode services...")
+    
+    # Stop hostapd
+    if os.path.exists(HOSTAPD_PID):
+        try:
+            with open(HOSTAPD_PID, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, signal.SIGTERM)
+        except:
+            pass
+        os.remove(HOSTAPD_PID)
+    subprocess.run(['pkill', '-f', 'hostapd.*hotspot'], check=False)
+    
+    # Stop dnsmasq
+    if os.path.exists(DNSMASQ_PID):
+        try:
+            with open(DNSMASQ_PID, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, signal.SIGTERM)
+        except:
+            pass
+        os.remove(DNSMASQ_PID)
+    subprocess.run(['pkill', '-f', 'dnsmasq.*hotspot'], check=False)
+    
+    # Clean up config files
+    for f in [HOSTAPD_CONF, DNSMASQ_CONF, DNSMASQ_LEASES]:
+        if os.path.exists(f):
+            os.remove(f)
 
 def get_wifi_interfaces():
     """Legacy function for backward compatibility."""
@@ -1170,15 +1364,18 @@ def cleanup(signal_received=None, frame=None):
     global VIRTUAL_AP_IFACE, USING_CONCURRENCY, HOTSPOT_IFACE
     print("\n\nStopping hotspot...")
     
-    # 1. Clean Firewall
+    # 1. Stop hostapd/dnsmasq if running (concurrent mode)
+    stop_concurrent_mode()
+    
+    # 2. Clean Firewall
     run_command(['iptables', '-t', 'nat', '-F', 'POSTROUTING'], check=False)
     run_command(['iptables', '-D', 'FORWARD', '-p', 'tcp', '--tcp-flags', 'SYN,RST', 'SYN', '-j', 'TCPMSS', '--clamp-mss-to-pmtu'], check=False)
     run_command(['iptables', '-D', 'FORWARD', '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT'], check=False)
     
-    # 2. Delete the hotspot connection
+    # 3. Delete the hotspot connection (NetworkManager mode)
     run_command(['nmcli', 'con', 'delete', CONNECTION_NAME], check=False)
     
-    # 3. Clean up virtual interface if we were using concurrent mode
+    # 4. Clean up virtual interface if we were using concurrent mode
     if USING_CONCURRENCY and VIRTUAL_AP_IFACE:
         print(f"Cleaning up virtual interface: {VIRTUAL_AP_IFACE}")
         subprocess.run(['iw', 'dev', VIRTUAL_AP_IFACE, 'del'], check=False)
@@ -1188,7 +1385,7 @@ def cleanup(signal_received=None, frame=None):
         # Also try to clean up any orphaned virtual interfaces
         delete_virtual_ap_interface(HOTSPOT_IFACE)
     
-    # 4. Kill PID file
+    # 5. Kill PID file
     if os.path.exists(PID_FILE): os.remove(PID_FILE)
     sys.exit(0)
 
@@ -1252,15 +1449,18 @@ def main():
         except Exception:
             pass
         
-        # 3. Always clean up the nmcli connection
+        # 3. Stop hostapd/dnsmasq if running (concurrent mode)
+        stop_concurrent_mode()
+        
+        # 4. Always clean up the nmcli connection
         run_command(['nmcli', 'con', 'delete', CONNECTION_NAME], check=False)
         
-        # 4. Clean up firewall rules
+        # 5. Clean up firewall rules
         run_command(['iptables', '-t', 'nat', '-F', 'POSTROUTING'], check=False)
         run_command(['iptables', '-D', 'FORWARD', '-p', 'tcp', '--tcp-flags', 'SYN,RST', 'SYN', '-j', 'TCPMSS', '--clamp-mss-to-pmtu'], check=False)
         run_command(['iptables', '-D', 'FORWARD', '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT'], check=False)
         
-        # 5. Clean up any virtual AP interfaces (for STA+AP concurrent mode)
+        # 6. Clean up any virtual AP interfaces (for STA+AP concurrent mode)
         wifi_interfaces = get_wifi_interfaces()
         for iface in wifi_interfaces:
             virtual_iface = f"{iface}_ap"
@@ -1270,7 +1470,7 @@ def main():
                 print(f"Cleaning up virtual interface: {virtual_iface}")
                 subprocess.run(['iw', 'dev', virtual_iface, 'del'], check=False)
         
-        # 6. Remove PID file
+        # 7. Remove PID file
         if os.path.exists(PID_FILE): os.remove(PID_FILE)
         
         print("Hotspot stopped.")
@@ -1337,9 +1537,10 @@ def main():
     
     supports_concurrency = target_iface_info and target_iface_info.get('supports_concurrency', False)
     is_connected = target_iface_info and target_iface_info.get('connected', False)
+    hostapd_available = check_hostapd_available() and check_dnsmasq_available()
     
-    if supports_concurrency and is_connected:
-        # === STA+AP CONCURRENT MODE ===
+    if supports_concurrency and is_connected and hostapd_available:
+        # === STA+AP CONCURRENT MODE using hostapd ===
         print(f"🎯 Using STA+AP Concurrent Mode - WiFi connection will be preserved!")
         connection_name = target_iface_info.get('connection_name', 'current network')
         print(f"   Maintaining connection to: {connection_name}")
@@ -1351,82 +1552,137 @@ def main():
             USING_CONCURRENCY = True
             actual_hotspot_iface = virtual_iface
             print(f"   Hotspot will run on virtual interface: {virtual_iface}")
+            
+            # Get the channel from the physical interface (must use same channel for concurrent mode)
+            channel = get_wifi_channel(physical_iface)
+            print(f"   Using channel {channel} (same as STA connection)")
+            
+            # Determine upstream interface for NAT
+            upstream = get_upstream_interface(EXCLUDE_VPN)
+            if not upstream:
+                upstream = physical_iface  # Use the STA connection as upstream
+            
+            # Generate configs
+            generate_hostapd_config(virtual_iface, args.ssid, args.password, 
+                                   channel=channel, band=args.band, hidden=args.hidden)
+            dnsmasq_conf, gateway_ip = generate_dnsmasq_config(virtual_iface, args.dns)
+            
+            # Setup network
+            setup_concurrent_ap_network(virtual_iface, gateway_ip, upstream)
+            
+            # Start services
+            if not start_hostapd(HOSTAPD_CONF):
+                print("⚠️ hostapd failed, falling back to standard mode")
+                stop_concurrent_mode()
+                delete_virtual_ap_interface(physical_iface)
+                USING_CONCURRENCY = False
+                actual_hotspot_iface = physical_iface
+                # Continue to NetworkManager mode below
+            else:
+                start_dnsmasq(dnsmasq_conf)
+                
+                print(f"\n🎯 Hotspot ACTIVE on {actual_hotspot_iface} (STA+AP Concurrent Mode)")
+                print(f"   WiFi connection preserved on {physical_iface}")
+                print(f"   Hotspot SSID: {args.ssid}")
+                print(f"   Gateway IP: {gateway_ip}")
+                write_status("active", f"Hotspot '{args.ssid}' active (STA+AP mode) - WiFi preserved")
         else:
             print(f"⚠️ Failed to create virtual interface, falling back to standard mode")
-            print(f"   WiFi will be disconnected to start hotspot")
+            USING_CONCURRENCY = False
             actual_hotspot_iface = physical_iface
-            ensure_wifi_active(physical_iface)
-            run_command(['nmcli', 'device', 'disconnect', physical_iface], check=False)
     else:
         # === STANDARD MODE (non-concurrent) ===
+        if supports_concurrency and is_connected and not hostapd_available:
+            print("⚠️ hostapd/dnsmasq not installed - cannot use STA+AP concurrent mode")
+            print("   Run installer again or: sudo apt install hostapd dnsmasq")
         actual_hotspot_iface = physical_iface
-        ensure_wifi_active(physical_iface)
-        run_command(['nmcli', 'device', 'disconnect', physical_iface], check=False)
+        USING_CONCURRENCY = False
     
-    # Clean up any existing hotspot connection
-    run_command(['nmcli', 'con', 'delete', CONNECTION_NAME], check=False)
+    # If not using concurrent mode (or it failed), use NetworkManager
+    if not USING_CONCURRENCY:
+        try:
+            ensure_wifi_active(physical_iface)
+            run_command(['nmcli', 'device', 'disconnect', physical_iface], check=False)
+            
+            # Clean up any existing hotspot connection
+            run_command(['nmcli', 'con', 'delete', CONNECTION_NAME], check=False)
 
-    try:
-        print(f"Creating Hotspot '{args.ssid}' on {actual_hotspot_iface}...")
-        run_command([
-            'nmcli', 'con', 'add', 'type', 'wifi', 'ifname', actual_hotspot_iface, 
-            'con-name', CONNECTION_NAME, 'autoconnect', 'no', 
-            'ssid', args.ssid, 'mode', 'ap', '802-11-wireless.band', args.band
-        ])
+            print(f"Creating Hotspot '{args.ssid}' on {actual_hotspot_iface}...")
+            run_command([
+                'nmcli', 'con', 'add', 'type', 'wifi', 'ifname', actual_hotspot_iface, 
+                'con-name', CONNECTION_NAME, 'autoconnect', 'no', 
+                'ssid', args.ssid, 'mode', 'ap', '802-11-wireless.band', args.band
+            ])
 
-        if args.hidden: run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, '802-11-wireless.hidden', 'yes'])
+            if args.hidden: run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, '802-11-wireless.hidden', 'yes'])
 
-        run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'wifi-sec.key-mgmt', 'wpa-psk'])
-        run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'wifi-sec.psk', args.password])
-        run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.method', 'shared'])
-        
-        if args.dns:
-            run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.dns', args.dns])
-            run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.ignore-auto-dns', 'yes'])
+            run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'wifi-sec.key-mgmt', 'wpa-psk'])
+            run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'wifi-sec.psk', args.password])
+            run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.method', 'shared'])
+            
+            if args.dns:
+                run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.dns', args.dns])
+                run_command(['nmcli', 'con', 'modify', CONNECTION_NAME, 'ipv4.ignore-auto-dns', 'yes'])
 
-        print("Activating hotspot...")
-        run_command(['nmcli', 'con', 'up', CONNECTION_NAME, 'ifname', actual_hotspot_iface])
-        
-        if USING_CONCURRENCY:
-            print(f"\n🎯 Hotspot ACTIVE on {actual_hotspot_iface} (STA+AP Concurrent Mode)")
-            print(f"   WiFi connection preserved on {physical_iface}")
-            write_status("active", f"Hotspot '{args.ssid}' active (STA+AP mode) - WiFi preserved")
-        else:
+            print("Activating hotspot...")
+            run_command(['nmcli', 'con', 'up', CONNECTION_NAME, 'ifname', actual_hotspot_iface])
+            
             print(f"\nHotspot ACTIVE on {actual_hotspot_iface}")
             write_status("active", f"Hotspot '{args.ssid}' is now active on {actual_hotspot_iface}")
-        
-        print("Monitoring internet source...")
-
+        except Exception as e:
+            print(f"Error starting NetworkManager hotspot: {e}")
+            cleanup()
+    
+    # === MONITORING LOOP (for both concurrent and standard modes) ===
+    print("Monitoring internet source...")
+    
+    try:
         idle_seconds = 0
         check_counter = 0
         while True:
             # Continually ensure we are using the correct upstream (changes if VPN connects/disconnects)
-            # Check every iteration (1 second) for fast VPN switching response
             new_upstream = get_upstream_interface(EXCLUDE_VPN)
             
             if new_upstream and new_upstream != CURRENT_UPSTREAM_IFACE:
-                # In concurrent mode, the upstream is the physical interface itself
                 if new_upstream != actual_hotspot_iface:
-                    update_firewall(actual_hotspot_iface, new_upstream)
+                    if USING_CONCURRENCY:
+                        # For concurrent mode, we already set up NAT - just track changes
+                        pass
+                    else:
+                        update_firewall(actual_hotspot_iface, new_upstream)
                     CURRENT_UPSTREAM_IFACE = new_upstream
             
             # Auto-off check: only check clients every 5 seconds to reduce overhead
             if args.auto_off > 0:
                 check_counter += 1
-                if check_counter >= 5:  # Every 5 seconds
+                if check_counter >= 5:
                     check_counter = 0
-                    clients = count_connected_clients(actual_hotspot_iface)
+                    if USING_CONCURRENCY:
+                        # For hostapd mode, count clients from lease file
+                        try:
+                            if os.path.exists(DNSMASQ_LEASES):
+                                with open(DNSMASQ_LEASES, 'r') as f:
+                                    clients = len([l for l in f.readlines() if l.strip()])
+                            else:
+                                clients = 0
+                        except:
+                            clients = 0
+                    else:
+                        clients = count_connected_clients(actual_hotspot_iface)
+                    
                     if clients == 0: 
                         idle_seconds += 5
                     else: 
                         idle_seconds = 0
-                    if idle_seconds >= (args.auto_off * 60):  # Convert minutes to seconds
-                        print("Auto-off trigger."); cleanup()
+                    if idle_seconds >= (args.auto_off * 60):
+                        print("Auto-off trigger.")
+                        cleanup()
 
-            time.sleep(1)  # Check every 1 second for faster VPN change detection
+            time.sleep(1)
 
     except Exception as e:
-        print(f"Error: {e}"); cleanup()
+        print(f"Error in monitoring loop: {e}")
+        cleanup()
 
 if __name__ == "__main__":
     main()

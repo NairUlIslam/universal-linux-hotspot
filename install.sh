@@ -27,19 +27,57 @@ ICON_PATH="$PROJECT_DIR/icon.png"
 echo "Installing Universal Linux Hotspot for user: $REAL_USER"
 echo "Location: $PROJECT_DIR"
 
+# 0. Install system dependencies for STA+AP concurrent mode
+echo "Checking system dependencies..."
+if command -v apt-get &> /dev/null; then
+    # Debian/Ubuntu
+    if ! command -v hostapd &> /dev/null || ! command -v dnsmasq &> /dev/null; then
+        echo "Installing hostapd and dnsmasq for STA+AP concurrent mode..."
+        apt-get update -qq
+        apt-get install -y hostapd dnsmasq
+        # Disable auto-start of hostapd and dnsmasq (we manage them manually)
+        systemctl disable hostapd 2>/dev/null || true
+        systemctl stop hostapd 2>/dev/null || true
+        systemctl disable dnsmasq 2>/dev/null || true
+        systemctl stop dnsmasq 2>/dev/null || true
+    fi
+elif command -v dnf &> /dev/null; then
+    # Fedora/RHEL
+    if ! command -v hostapd &> /dev/null || ! command -v dnsmasq &> /dev/null; then
+        echo "Installing hostapd and dnsmasq for STA+AP concurrent mode..."
+        dnf install -y hostapd dnsmasq
+        systemctl disable hostapd 2>/dev/null || true
+        systemctl stop hostapd 2>/dev/null || true
+        systemctl disable dnsmasq 2>/dev/null || true
+        systemctl stop dnsmasq 2>/dev/null || true
+    fi
+elif command -v pacman &> /dev/null; then
+    # Arch Linux
+    if ! command -v hostapd &> /dev/null || ! command -v dnsmasq &> /dev/null; then
+        echo "Installing hostapd and dnsmasq for STA+AP concurrent mode..."
+        pacman -S --noconfirm hostapd dnsmasq
+        systemctl disable hostapd 2>/dev/null || true
+        systemctl stop hostapd 2>/dev/null || true
+        systemctl disable dnsmasq 2>/dev/null || true
+        systemctl stop dnsmasq 2>/dev/null || true
+    fi
+else
+    echo "Warning: Could not detect package manager. Please install 'hostapd' and 'dnsmasq' manually for STA+AP concurrent mode."
+fi
+
 # 1. Setup Python Virtual Environment
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv "$VENV_DIR"
 fi
 
-echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade pip
+echo "Installing Python dependencies..."
+"$PYTHON_BIN" -m pip install --upgrade pip -q
 if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-    "$PYTHON_BIN" -m pip install -r "$PROJECT_DIR/requirements.txt"
+    "$PYTHON_BIN" -m pip install -r "$PROJECT_DIR/requirements.txt" -q
 else
     # Default requirements if file missing
-    "$PYTHON_BIN" -m pip install PyQt6 qrcode Pillow
+    "$PYTHON_BIN" -m pip install PyQt6 qrcode Pillow -q
 fi
 
 # 2. Setup Sudoers for Wrapper Script
