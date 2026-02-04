@@ -1892,12 +1892,11 @@ def main():
             new_upstream = get_upstream_interface(EXCLUDE_VPN)
             
             if new_upstream and new_upstream != CURRENT_UPSTREAM_IFACE:
+                # Upstream changed (e.g. VPN connected/disconnected)
+                # We MUST update firewall rules for both Concurrent and Standard modes
                 if new_upstream != actual_hotspot_iface:
-                    if USING_CONCURRENCY:
-                        # For concurrent mode, we already set up NAT - just track changes
-                        pass
-                    else:
-                        update_firewall(actual_hotspot_iface, new_upstream)
+                    print(f"🔄 Upstream changed: {CURRENT_UPSTREAM_IFACE} -> {new_upstream}. Updating routing...")
+                    update_firewall(actual_hotspot_iface, new_upstream)
                     CURRENT_UPSTREAM_IFACE = new_upstream
             
             # Auto-off check: only check clients every 5 seconds to reduce overhead
