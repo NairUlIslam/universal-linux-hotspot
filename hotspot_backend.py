@@ -1699,16 +1699,7 @@ def main():
     
     print(f"Decision: Dual Adapter={using_separate_adapter}, Concurrency={supports_concurrency}, Connected={is_connected}")
     
-    if using_separate_adapter:
-        # === DUAL ADAPTER MODE ===
-        # Using different WiFi/Ethernet for internet - hotspot adapter is independent
-        # No need for concurrent mode, no regulatory restrictions
-        print(f"🔌 Dual Adapter Mode: Hotspot on {physical_iface}, Internet via {internet_iface}")
-        actual_hotspot_iface = physical_iface
-        USING_CONCURRENCY = False
-        # Standard mode works fine here - the hotspot adapter isn't connected to anything
-        
-    elif supports_concurrency and is_connected and hostapd_available:
+    if supports_concurrency and is_connected and hostapd_available:
         # === STA+AP CONCURRENT MODE (same adapter) ===
         # This is where regulatory restrictions might apply
         print(f"🎯 Using STA+AP Concurrent Mode - WiFi connection will be preserved!")
@@ -1814,6 +1805,14 @@ def main():
             write_status("error", "Failed to create virtual AP interface", is_error=True)
             if os.path.exists(PID_FILE): os.remove(PID_FILE)
             sys.exit(1)
+
+    elif using_separate_adapter:
+        # === DUAL ADAPTER MODE ===
+        # Using different WiFi/Ethernet for internet - hotspot adapter is independent
+        print(f"🔌 Dual Adapter Mode: Hotspot on {physical_iface}, Internet via {internet_iface}")
+        actual_hotspot_iface = physical_iface
+        USING_CONCURRENCY = False
+        # Fall through to standard NetworkManager setup below
             
     elif is_connected and not hostapd_available:
         # Connected to WiFi but hostapd not installed - can't do concurrent mode
