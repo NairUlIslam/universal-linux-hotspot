@@ -125,6 +125,16 @@ def delete_virtual_ap_interface(physical_iface):
         return True
     return False
 
+def get_best_channel(iface, band='bg'):
+    """
+    Select the best channel for the given band.
+    Currently returns defaults, but could be enhanced to scan for least congested.
+    """
+    # TODO: Implement actual congestion scanning
+    if band == 'a':
+        return 36
+    return 6
+
 def get_wifi_channel(iface):
     """Get the current channel of a WiFi interface."""
     try:
@@ -140,17 +150,28 @@ def get_wifi_channel(iface):
         pass
     return 6  # Default to channel 6
 
-def check_5ghz_ap_allowed(channel):
+def check_5ghz_ap_allowed(channel, iface):
     """
-    Check if 5GHz AP mode is allowed on the given channel.
+    Check if 5GHz AP mode is allowed on the given channel for the specific interface.
     Returns: (allowed: bool, reason: str)
     """
     if channel <= 14:
         return True, "2.4GHz channel"
     
     try:
-        # Get regulatory info
-        result = subprocess.run(['iw', 'phy', 'phy0', 'channels'], 
+        # Resolve interface to phy
+        phy_name = 'phy0' # Default
+        info_result = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        if info_result.returncode == 0:
+            for line in info_result.stdout.splitlines():
+                 parts = line.strip().split()
+                 if len(parts) >= 2 and parts[0] == 'wiphy':
+                     phy_idx = parts[1]
+                     phy_name = f"phy{phy_idx}"
+                     break
+
+        # Get regulatory info for the correct PHY
+        result = subprocess.run(['iw', 'phy', phy_name, 'channels'], 
                                capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             lines = result.stdout.splitlines()
@@ -159,8 +180,8 @@ def check_5ghz_ap_allowed(channel):
                 if f'[{channel}]' in line:
                     # Check if NO-IR flag is present
                     if 'No IR' in line or 'NO-IR' in line:
-                        return False, f"Channel {channel} has NO-IR (No Initiate Radiation) restriction"
-                    return True, f"Channel {channel} allowed"
+                        return False, f"Channel {channel} on {phy_name} has NO-IR (No Initiate Radiation) restriction"
+                    return True, f"Channel {channel} allowed on {phy_name}"
     except:
         pass
     
@@ -1655,12 +1676,35 @@ def main():
         connection_name = target_iface_info.get('connection_name', 'current network')
         print(f"   Maintaining connection to: {connection_name}")
         
-        # Get the channel from the physical interface (must use same channel for concurrent mode)
-        channel = get_wifi_channel(physical_iface)
-        print(f"   STA channel: {channel}")
+        # Get channel logic for concurrent mode
+        concurrency_channels = target_iface_info.get('concurrency_channels', 1)
+        
+        if concurrency_channels >= 2:
+             # Dual-channel support (rare but possible, or VIRTUAL_AP logic)
+             # User said it worked before, so we TRUST their preference first
+             print(f"   Device supports multi-channel concurrency (channels: {concurrency_channels})")
+             if args.band == 'a':
+                 print("   User requested 5GHz band")
+                 # If user explicitly wants 5GHz, check if we can use a different 5GHz channel? 
+                 # Usually dual-band means 2.4 + 5. It's safer to stick to different bands if possible.
+                 # But for now, let's just try to generate a channel for the requested band.
+                 # Actually, usually getting a clean channel is better.
+                 channel = get_best_channel(iface=physical_iface, band='a')
+             else:
+                 print("   User requested 2.4GHz band (default)")
+                 channel = get_best_channel(iface=physical_iface, band='bg')
+             
+             print(f"   Selected channel: {channel} (Cross-band concurrency attempt)")
+             
+        else:
+             # Single-channel limit: MUST match the physical channel
+             channel = get_wifi_channel(physical_iface)
+             print(f"   Single-channel device: Forcing hotspot to match STA channel: {channel}")
+         
+        print(f"   Hotspot channel: {channel}")
         
         # Check if 5GHz AP is allowed on this channel (only for same-adapter concurrent)
-        ap_allowed, reason = check_5ghz_ap_allowed(channel)
+        ap_allowed, reason = check_5ghz_ap_allowed(channel, physical_iface)
         if not ap_allowed:
             print(f"⚠️ 5GHz AP restriction detected: {reason}")
             print("   Attempting regulatory bypass...")
@@ -1681,8 +1725,10 @@ def main():
             subprocess.run(['nmcli', 'device', 'set', virtual_iface, 'managed', 'no'], 
                           capture_output=True, check=False)
             
-            # Determine upstream interface for NAT (the STA connection)
-            upstream = physical_iface
+            # Determine upstream interface for NAT
+            # Use dynamic routing to support VPNs, instead of hardcoding to physical_iface
+            upstream_candidate = get_upstream_interface(exclude_vpn=args.exclude_vpn)
+            upstream = upstream_candidate if upstream_candidate else physical_iface
             
             # Generate configs with regulatory settings
             generate_hostapd_config(virtual_iface, args.ssid, args.password, 
