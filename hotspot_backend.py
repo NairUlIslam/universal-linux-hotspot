@@ -284,7 +284,11 @@ dhcp-leasefile={DNSMASQ_LEASES}
     if dns_server:
         config += f"server={dns_server}\n"
     else:
-        config += "server=8.8.8.8\nserver=8.8.4.4\n"
+        # BUG FIX: Do NOT force Google DNS (8.8.8.8).
+        # Many VPNs block non-VPN DNS traffic to prevent leaks.
+        # By omitting 'server=', dnsmasq defaults to determining upstream DNS from host settings (resolv.conf),
+        # which will correctly point to the VPN's DNS when active.
+        pass
     
     with open(DNSMASQ_CONF, 'w') as f:
         f.write(config)
